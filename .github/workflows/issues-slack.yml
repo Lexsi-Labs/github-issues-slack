@@ -1,0 +1,39 @@
+# Posts new issues, comments, and closed/reopened issues from 6 Lexsi-Labs repos to
+# Slack, one channel per repo (scripts/issues_to_slack.py). Runs every 10 minutes. Each repo's
+# Slack webhook is an Actions secret: SLACK_WEBHOOK_ALIGNTUNE, _AGENTTUNE, _AUDITKIT, _CIRCUITKIT,
+# _CURATORKIT, _SAFETUNE. Nothing is written to any repo.
+name: Issues to Slack
+
+on:
+  schedule:
+    - cron: "3,13,23,33,43,53 * * * *"   # every 10 minutes
+  workflow_dispatch:
+
+permissions:
+  actions: read     # to find the last successful run
+  issues: read
+
+concurrency:
+  group: issues-slack
+  cancel-in-progress: false
+
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Post new issue activity to Slack
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          SLACK_WEBHOOK_ALIGNTUNE: ${{ secrets.SLACK_WEBHOOK_ALIGNTUNE }}
+          SLACK_WEBHOOK_AGENTTUNE: ${{ secrets.SLACK_WEBHOOK_AGENTTUNE }}
+          SLACK_WEBHOOK_AUDITKIT: ${{ secrets.SLACK_WEBHOOK_AUDITKIT }}
+          SLACK_WEBHOOK_CIRCUITKIT: ${{ secrets.SLACK_WEBHOOK_CIRCUITKIT }}
+          SLACK_WEBHOOK_CURATORKIT: ${{ secrets.SLACK_WEBHOOK_CURATORKIT }}
+          SLACK_WEBHOOK_SAFETUNE: ${{ secrets.SLACK_WEBHOOK_SAFETUNE }}
+        run: |
+          export RUN_STARTED_AT=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}" -q .run_started_at)
+          python3 scripts/issues_to_slack.py
