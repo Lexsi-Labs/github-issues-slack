@@ -12,7 +12,8 @@ classic Slack incoming webhook both work. A repo without its secret is skipped.
 
 Usage:  GITHUB_TOKEN=... GITHUB_REPOSITORY=owner/repo RUN_ID=... python3 scripts/issues_to_slack.py
 """
-import http.client, json, os, time, urllib.request, urllib.error
+import http.client, json, os, re, time, urllib.request, urllib.error
+from datetime import datetime, timedelta, timezone
 
 REPOS = ["aligntune", "AgentTune", "AuditKIT", "CircuitKIT", "CuratorKIT", "SafeTune"]   # all Lexsi-Labs
 ORG = "Lexsi-Labs"
@@ -60,31 +61,60 @@ def last_success_start():
     return runs[0]["run_started_at"] if runs else None
 
 
+LINE = "━" * 28
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def ist(when):
+    """GitHub's UTC timestamp shown in India time, e.g. 25 Oct 2026, 09:21 IST."""
+    t = datetime.strptime(when, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).astimezone(IST)
+    return t.strftime("%d %b %Y, %H:%M IST")
+
+
+def excerpt(text, n=700):
+    """The issue text as written, line breaks kept, cut at a line break after about n characters."""
+    text = re.sub(r"\n{3,}", "\n\n", (text or "").replace("\r", "")).strip()
+    if len(text) <= n:
+        return text
+    cut = text.rfind("\n", 0, n)
+    return text[:cut if cut > n // 2 else n].rstrip() + "\n…"
+
+
+def message(head, repo, issue, who, when, body=None, url=None):
+    """One card per post: a line above and below, blank lines between header, text and link.
+    Plain text, since Workflow Builder variables don't render Slack markup."""
+    tags = ", ".join(l["name"] for l in issue.get("labels", []))
+    parts = [f"{head} · {repo} #{issue['number']}\n{issue['title'].strip()}\n"
+             f"👤 {who}  ·  📅 {ist(when)}" + (f"  ·  🏷️ {tags}" if tags else "")]
+    if body and body.strip():
+        parts.append(excerpt(body, 400))
+    parts.append(f"🔗 {url or issue['html_url']}")
+    return f"{LINE}\n" + "\n\n".join(parts) + f"\n{LINE}"
+
+
 def events(repo, since, until):
     """(time, text) for each new issue, comment, close and reopen in [since, until)."""
     out, inside = [], lambda t: t and since <= t < until
     for i in gh_all(f"repos/{ORG}/{repo}/issues?state=all&since={since}"):
         if "pull_request" in i:
             continue
-        link, who = f"<{i['html_url']}|#{i['number']} {i['title']}>", i["user"]["login"]
         if inside(i["created_at"]):
-            out.append((i["created_at"], f"*New issue* in {repo}: {link} by {who}"))
+            out.append((i["created_at"], message("🆕 New issue", repo, i, i["user"]["login"], i["created_at"], i["body"])))
         if i["state"] == "closed" and inside(i["closed_at"]):
-            out.append((i["closed_at"], f"*Closed* in {repo}: {link}"))
+            who = (i.get("closed_by") or {}).get("login", "someone")
+            out.append((i["closed_at"], message("✅ Closed", repo, i, who, i["closed_at"])))
     for e in gh(f"repos/{ORG}/{repo}/issues/events?per_page=100"):   # newest 100, plenty for 10 minutes
         if e["event"] == "reopened" and inside(e["created_at"]) and "pull_request" not in e["issue"]:
-            i = e["issue"]
-            out.append((e["created_at"], f"*Reopened* in {repo}: <{i['html_url']}|#{i['number']} {i['title']}> "
-                                         f"by {(e.get('actor') or {}).get('login', 'someone')}"))
+            who = (e.get("actor") or {}).get("login", "someone")
+            out.append((e["created_at"], message("🔄 Reopened", repo, e["issue"], who, e["created_at"])))
         elif e["created_at"] < since:
             break   # events come newest first
     for c in gh_all(f"repos/{ORG}/{repo}/issues/comments?since={since}"):
         if "/pull/" in c["html_url"] or not inside(c["created_at"]):
             continue
-        body = " ".join(c["body"].split())
-        body = body[:300] + ("…" if len(body) > 300 else "")
-        out.append((c["created_at"], f"*Comment* in {repo} by {c['user']['login']} on <{c['html_url']}|"
-                                     f"#{c['issue_url'].rsplit('/', 1)[1]}>: {body}"))
+        issue = gh(c["issue_url"].split("api.github.com/", 1)[1])
+        out.append((c["created_at"], message("💬 Comment", repo, issue, c["user"]["login"], c["created_at"],
+                                             c["body"], c["html_url"])))
     return sorted(out)
 
 
